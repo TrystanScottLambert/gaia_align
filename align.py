@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from astroquery.gaia import Gaia
 
 from draggable_scatter import DraggableScatter
-from mes_check import find_data_extension
+from mes_check import find_data_extension, get_pixscale_from_wcs
 
 BOX_PADDING = 20
 
@@ -133,8 +133,8 @@ class Image:
         center_x_pix = self.data.shape[1]/2
 
         # Assuming square pixels.
-        search_width = self.data.shape[1] * np.abs(self.header['PC1_1'])
-        search_height = self.data.shape[0] * np.abs(self.header['PC1_1'])
+        search_width = self.data.shape[1] * get_pixscale_from_wcs(self.header)
+        search_height = self.data.shape[0] * get_pixscale_from_wcs(self.header)
 
         center_ra, center_dec = self.current_wcs.pixel_to_world_values(center_x_pix, center_y_pix)
         gaia_ra, gaia_dec = search_gaia_archives(
@@ -224,4 +224,4 @@ class Image:
 
 if __name__ == '__main__':
     INFILE = 'hz7_cosweb/HZ7_cosweb_30arcsec_f115w_nup_i2d.fits'
-    imgae = Image(INFILE)
+    image = Image(INFILE)
