@@ -4,7 +4,6 @@ determine a WCS.
 """
 
 from typing import Tuple
-import glob
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -12,6 +11,7 @@ from astropy.visualization import ZScaleInterval
 from astropy.coordinates import SkyCoord
 from astropy.stats import sigma_clipped_stats
 from astropy.wcs import utils
+from astropy.modeling import models, fitting
 from photutils.detection import DAOStarFinder
 import astropy.units as u
 from scipy.optimize import curve_fit
@@ -19,27 +19,9 @@ import matplotlib.pyplot as plt
 from astroquery.gaia import Gaia
 
 from draggable_scatter import DraggableScatter
+from mes_check import find_data_extension
 
-
-def are_points_aligned(data: np.ndarray, x_array: np.array, y_array: np.ndarray) -> bool:
-    """
-    Tries to find a source in every cut out image. If less than 70% of the cutouts are determined to
-    not have sources then the test is a fail.
-    """
-    counter = 0
-    for i, _ in enumerate(x_array):
-        image = cut_star(x_array[i], y_array[i], data)
-        if image is not None:
-            image = image[0]
-            _, median, std = sigma_clipped_stats(image, sigma=3)
-            daofind=DAOStarFinder(fwhm=3.0, threshold=5*std)
-            sources = daofind(image - median)
-            if sources is None:
-                counter += 1
-        else:
-            counter += 1
-    return counter/len(x_array) < 0.7
-
+BOX_PADDING = 20
 
 def search_gaia_archives(ra: float, dec: float, height:float, width:float)\
     -> Tuple[np.ndarray, np.ndarray]:
@@ -79,22 +61,28 @@ def get_star_position(star: np.ndarray) -> tuple[float, float]:
 
     return column_popt[2], row_popt[2]
 
+def create_postage_stamp(x_position: float, y_position: float, image_data: np.ndarray) -> np.ndarray:
+    """
+    Cuts out a postage stamp of the data around the x_pos and y_pos. 
+    """
+    x_position_rounded, y_position_rounded = int(round(x_position)), int(round(y_position))
+    image_postage_stamp = image_data[
+         y_position_rounded-BOX_PADDING:y_position_rounded+BOX_PADDING,
+         x_position_rounded-BOX_PADDING:x_position_rounded+BOX_PADDING]
+    return image_postage_stamp
+
 def cut_star(x_position: float, y_position: float, image_data: np.ndarray)\
       -> tuple[np.ndarray, float, float]:
     """Cuts out star and determines the center of said star."""
-    x_position_rounded, y_position_rounded = int(round(x_position)), int(round(y_position))
-    padding = 20
-    image_postage_stamp = image_data[
-         y_position_rounded-padding:y_position_rounded+padding,
-         x_position_rounded-padding:x_position_rounded+padding]
+    image_postage_stamp = create_postage_stamp(x_position, y_position, image_data)
 
     if 0 in image_postage_stamp.shape:
         return None
 
     try:
         local_x_position, local_y_position = get_star_position(image_postage_stamp)
-        accurate_x_position = x_position_rounded - padding + local_x_position
-        accurate_y_position = y_position_rounded - padding + local_y_position
+        accurate_x_position = int(x_position) - BOX_PADDING + local_x_position
+        accurate_y_position = int(y_position) - BOX_PADDING + local_y_position
         return image_postage_stamp, accurate_x_position, accurate_y_position
     except (RuntimeError, ValueError, TypeError):
         return None
@@ -120,15 +108,16 @@ def get_usable_gaia(gaia_x_array: np.ndarray, gaia_y_array: np.ndarray, image: n
     return np.array(accurate_x), np.array(accurate_y), np.array(indicies)
 
 
-class ChipImage:
-    """Main class for chip data."""
+class Image:
+    """Main class for images."""
 
     def __init__(self, chip_name:str):
         """Initilizing."""
         self.file_name = chip_name
         self.hdul = fits.open(chip_name)
-        self.data = self.hdul[0].data
-        self.header = self.hdul[0].header
+        self.data_extension = find_data_extension(self.hdul)
+        self.data = self.hdul[self.data_extension].data
+        self.header = self.hdul[self.data_extension].header
         self.current_wcs = WCS(self.header)
         current_gaia_info = self.query_gaia()
         self.gaia_ra = current_gaia_info[0]
@@ -225,40 +214,14 @@ class ChipImage:
 
         return wcs
 
-    def determine_wcs_with_offsets(
-            self, x_pix_offset: np.ndarray, y_pix_offset: np.ndarray,
-            show_alignment: bool = False) -> WCS:
-        """
-        Using a set of offsets to try fit the data. 
-        If these offset fail then manual wcs will be needed.
-        """
-        gaia_skycoords, gaia_pixcoords = self._fit_gaia_coords(x_pix_offset, y_pix_offset)
-
-        if show_alignment:
-            self._overplot_scatter(gaia_pixcoords[0], gaia_pixcoords[1])
-
-        if are_points_aligned(self.data, gaia_pixcoords[0], gaia_pixcoords[1]):
-            wcs = utils.fit_wcs_from_points(gaia_pixcoords, gaia_skycoords)
-        else:
-            print('Offsets failed to fit. Manual intervention required.')
-            wcs = self.determine_wcs_manually()
-
-        return wcs
-
     def update_wcs(self, wcs_object: WCS) -> None:
         """
         Updates the chip with the given wcs object.
         """
-        self.hdul[0].header.update(wcs_object.to_header())
+        self.hdul[self.data_extension].header.update(wcs_object.to_header())
         self.hdul.writeto(self.file_name.split('.fits')[0] + '.wcs_aligned.fits', overwrite=True)
 
-if __name__ == '__main__':
 
-    files = glob.glob('/home/tlambert/Downloads/g_band/SCIENCE/*wcs.fits')
-    done_files = glob.glob('/home/tlambert/Downloads/g_band/SCIENCE/*.wcs_aligned*')
-    done_file_originals = [file.replace('.wcs_aligned','') for file in done_files]
-    to_be_done_files = np.setdiff1d(files, done_file_originals)
-    for file in to_be_done_files:
-        chip = ChipImage(file)
-        updated_wcs = chip.determine_wcs_with_gaia()
-        chip.update_wcs(updated_wcs)
+if __name__ == '__main__':
+    INFILE = 'hz7_cosweb/HZ7_cosweb_30arcsec_f115w_nup_i2d.fits'
+    imgae = Image(INFILE)
